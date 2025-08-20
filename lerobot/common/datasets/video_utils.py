@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import av
+import fractions
 import pyarrow as pa
 import torch
 import torchvision
@@ -328,6 +329,49 @@ def encode_video_frames(
 
     if not video_path.exists():
         raise OSError(f"Video encoding did not work. File not found: {video_path}.")
+
+
+class VideoStreamEncoder:
+    """
+    Encodes a video stream from individual frames and writes it to a video file.
+
+    This class provides a simple interface to create a video file by sequentially adding frames (as
+    numpy arrays) and finalizing the file upon completion. It uses PyAV for video encoding.
+
+    Args:
+        video_path (str or Path): Path to the output video file.
+        fps (int): Frames per second for the output video.
+        width (int): Width of the video frames.
+        height (int): Height of the video frames.
+        vcodec (str, optional): Video codec to use (default: "libx264").
+        pix_fmt (str, optional): Pixel format (default: "yuv420p").
+
+    Methods:
+        add_frame(image): Adds a single frame to the video.
+        close(): Finalizes and closes the video file.
+    """
+    def __init__(self, video_path, fps, width, height, vcodec="libx264", pix_fmt="yuv420p"):
+        self.container = av.open(str(video_path), mode="w")
+        self.stream = self.container.add_stream(vcodec, rate=fps)
+        self.stream.width = width
+        self.stream.height = height
+        self.stream.pix_fmt = pix_fmt
+        self.fps = fps
+        self.timestamp = 0
+        self.clock_rate = 90000
+
+    def add_frame(self, image):
+        frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+        frame.pts = self.timestamp
+        frame.time_base = fractions.Fraction(1, self.clock_rate)
+        self.timestamp += int((1 / self.fps) * self.clock_rate)
+        for packet in self.stream.encode(frame):
+            self.container.mux(packet)
+
+    def close(self):
+        for packet in self.stream.encode(None):
+            self.container.mux(packet)
+        self.container.close()
 
 
 @dataclass
