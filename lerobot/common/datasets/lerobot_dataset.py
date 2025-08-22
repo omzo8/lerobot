@@ -19,12 +19,16 @@ import shutil
 from pathlib import Path
 from typing import Callable
 
+import av
 import datasets
 import numpy as np
 import packaging.version
 import PIL.Image
 import torch
 import torch.utils
+
+# Suppress verbose libx264 output
+logging.getLogger("libav").setLevel(av.logging.ERROR)
 from datasets import concatenate_datasets, load_dataset
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.constants import REPOCARD_NAME
@@ -819,14 +823,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
                     f"An element of the frame is not in the features. '{key}' not in '{self.features.keys()}'."
                 )
 
+            # Skip video/image keys since they're handled by VideoStreamEncoder
             if self.features[key]["dtype"] in ["image", "video"]:
-                img_path = self._get_image_file_path(
-                    episode_index=self.episode_buffer["episode_index"], image_key=key, frame_index=frame_index
-                )
-                if frame_index == 0:
-                    img_path.parent.mkdir(parents=True, exist_ok=True)
-                self._save_image(frame[key], img_path)
-                self.episode_buffer[key].append(str(img_path))
+                continue
             else:
                 self.episode_buffer[key].append(frame[key])
 
@@ -869,16 +868,41 @@ class LeRobotDataset(torch.utils.data.Dataset):
             # are processed separately by storing image path and frame info as meta data
             if key in ["index", "episode_index", "task_index"] or ft["dtype"] in ["image", "video"]:
                 continue
+            # Skip keys that have no data (empty lists) to avoid stacking errors
+            if len(episode_buffer[key]) == 0:
+                continue
             episode_buffer[key] = np.stack(episode_buffer[key])
 
         self._wait_image_writer()
         self._save_episode_table(episode_buffer, episode_index)
-        ep_stats = compute_episode_stats(episode_buffer, self.features)
 
+        # Filter features to only include keys that are actually in the episode buffer with non-empty data
+        filtered_features = {}
+        for k, v in self.features.items():
+            if k in episode_buffer:
+                # Check if the data is not empty
+                data = episode_buffer[k]
+                if isinstance(data, (list, np.ndarray)) and len(data) > 0:
+                    # For numpy arrays, also check if it has elements
+                    if isinstance(data, np.ndarray) and data.size > 0:
+                        filtered_features[k] = v
+                    elif isinstance(data, list):
+                        filtered_features[k] = v
+                elif not isinstance(data, (list, np.ndarray)):
+                    # For non-array data (like scalars), include it
+                    filtered_features[k] = v
+        
+        ep_stats = {}
+
+        # Skip video encoding since videos are already created by VideoStreamEncoder
+        # Just reference the existing video files that were created during recording
         if len(self.meta.video_keys) > 0:
-            video_paths = self.encode_episode_videos(episode_index)
             for key in self.meta.video_keys:
-                episode_buffer[key] = video_paths[key]
+                # Video paths should already be in episode_buffer from our custom save workflow
+                if key not in episode_buffer:
+                    # Fallback: construct the expected video path if not provided
+                    video_path = self.root / self.meta.get_video_file_path(episode_index, key)
+                    episode_buffer[key] = str(video_path)
 
         # `meta.save_episode` be executed after encoding the videos
         self.meta.save_episode(episode_index, episode_length, episode_tasks, ep_stats)

@@ -351,6 +351,7 @@ class VideoStreamEncoder:
         close(): Finalizes and closes the video file.
     """
     def __init__(self, video_path, fps, width, height, vcodec="libx264", pix_fmt="yuv420p"):
+        logging.getLogger("libav").setLevel(av.logging.ERROR)
         self.container = av.open(str(video_path), mode="w")
         self.stream = self.container.add_stream(vcodec, rate=fps)
         self.stream.width = width
